@@ -28,7 +28,7 @@ import type {
   VideoGenerationResult,
 } from '../types';
 
-const DEFAULT_MODEL = 'veo-3.0-generate-001';
+const DEFAULT_MODEL = 'veo-001';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 const MAX_POLL_ATTEMPTS = 60; // 10 minutes max

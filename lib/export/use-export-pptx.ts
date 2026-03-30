@@ -10,13 +10,13 @@ import { useStageStore } from '@/lib/store';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useMediaGenerationStore, isMediaPlaceholder } from '@/lib/store/media-generation';
 import { useI18n } from '@/lib/hooks/use-i18n';
-import type {
+import {
   Slide,
   PPTElementOutline,
   PPTElementShadow,
   PPTElementLink,
 } from '@/lib/types/slides';
-import type { Scene, SlideContent } from '@/lib/types/stage';
+import type { Scene, SlideContent, QuizContent } from '@/lib/types/stage';
 import type { SpeechAction } from '@/lib/types/action';
 import { getElementRange, getLineElementPath, getTableSubThemeColor } from '@/lib/utils/element';
 import { type AST, toAST } from '@/lib/export/html-parser';
@@ -1177,5 +1177,61 @@ export function useExportPPTX() {
     t,
   ]);
 
-  return { exporting, exportPPTX, exportResourcePack };
+  // ── Export Quiz Markdown ──
+  const exportQuizMarkdown = useCallback(() => {
+    withExportGuard(async () => {
+      const fileName = `${stage?.name || 'course'}_题库`;
+      const markdown = formatQuizToMarkdown(scenes, stage?.name || '课程');
+
+      if (!markdown) {
+        toast.error(t('export.noQuizFound') || '课程中未找到题目');
+        return;
+      }
+
+      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+      saveAs(blob, `${fileName}.md`);
+      toast.success(t('export.exportSuccess'));
+    });
+  }, [withExportGuard, scenes, stage?.name, t]);
+
+  return { exporting, exportPPTX, exportResourcePack, exportQuizMarkdown };
+}
+
+/**
+ * Format quiz questions into a readable Markdown string
+ */
+function formatQuizToMarkdown(scenes: Scene[], stageName: string): string {
+  const quizScenes = scenes.filter((s) => s.content.type === 'quiz');
+  if (quizScenes.length === 0) return '';
+
+  let md = `# ${stageName} - 题库\n\n`;
+
+  quizScenes.forEach((scene, sIdx) => {
+    const content = scene.content as QuizContent;
+    md += `## ${sIdx + 1}. ${scene.title}\n\n`;
+
+    content.questions.forEach((q, qIdx) => {
+      md += `### Q${qIdx + 1}: ${q.question}\n`;
+      md += `类型: ${q.type === 'single' ? '单选题' : q.type === 'multiple' ? '多选题' : '简答题'}\n\n`;
+
+      if (q.options && q.options.length > 0) {
+        q.options.forEach((opt) => {
+          md += `- ${opt.value}. ${opt.label}\n`;
+        });
+        md += '\n';
+      }
+
+      if (q.answer && q.answer.length > 0) {
+        md += `**正确答案**: ${q.answer.join(', ')}\n\n`;
+      }
+
+      if (q.analysis) {
+        md += `**答案解析**:\n${q.analysis}\n\n`;
+      }
+
+      md += '---\n\n';
+    });
+  });
+
+  return md;
 }

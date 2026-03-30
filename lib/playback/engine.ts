@@ -463,6 +463,14 @@ export class PlaybackEngine {
 
       case 'discussion': {
         const discussionAction = action as DiscussionAction;
+
+        // Skip if in recording mode
+        if (this.callbacks.isRecordingMode?.()) {
+          this.consumedDiscussions.add(discussionAction.id);
+          this.processNext();
+          return;
+        }
+
         // Check if already consumed
         if (this.consumedDiscussions.has(discussionAction.id)) {
           this.processNext();

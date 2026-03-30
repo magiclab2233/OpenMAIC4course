@@ -21,6 +21,28 @@ export class AudioPlayer {
   private volume: number = 1;
   private playbackRate: number = 1;
 
+  // Audio Context for stream capture
+  private audioContext: any = null;
+  private audioDestination: any = null;
+  private audioSource: any = null;
+
+  /**
+   * Get the audio stream for recording
+   */
+  public getAudioStream(): MediaStream | null {
+    if (typeof window === 'undefined') return null;
+    if (!this.audioContext) {
+      const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) {
+        log.warn('AudioContext not supported in this browser');
+        return null;
+      }
+      this.audioContext = new AudioContextClass();
+      this.audioDestination = this.audioContext.createMediaStreamDestination();
+    }
+    return this.audioDestination!.stream;
+  }
+
   /**
    * Play audio (from IndexedDB pre-generated cache)
    * @param audioId Audio ID
@@ -28,6 +50,11 @@ export class AudioPlayer {
    */
   public async play(audioId: string): Promise<boolean> {
     try {
+      // Ensure AudioContext is resumed (browsers block it until user gesture)
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
       // Get audio from database
       const audioRecord = await db.audioFiles.get(audioId);
 
@@ -41,6 +68,16 @@ export class AudioPlayer {
 
       // Create audio element
       this.audio = new Audio();
+
+      // Connect to audio context for streaming (if enabled)
+      if (this.audioContext && this.audioDestination) {
+        if (this.audioSource) {
+          this.audioSource.disconnect();
+        }
+        this.audioSource = this.audioContext.createMediaElementSource(this.audio);
+        this.audioSource.connect(this.audioDestination);
+        this.audioSource.connect(this.audioContext.destination);
+      }
 
       // Set audio source
       const blobUrl = URL.createObjectURL(audioRecord.blob);
@@ -86,6 +123,10 @@ export class AudioPlayer {
       this.audio.pause();
       this.audio.currentTime = 0;
       this.audio = null;
+    }
+    if (this.audioSource) {
+      this.audioSource.disconnect();
+      this.audioSource = null;
     }
     // Note: onEndedCallback intentionally NOT cleared here because play()
     // calls stop() internally — clearing would break the callback chain.

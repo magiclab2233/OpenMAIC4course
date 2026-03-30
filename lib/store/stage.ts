@@ -65,6 +65,10 @@ interface StageState {
   currentGeneratingOrder: number;
   failedOutlines: SceneOutline[];
 
+  // Recording mode
+  recordingMode: boolean;
+  setRecordingMode: (recordingMode: boolean) => void;
+
   // Actions
   setStage: (stage: Stage) => void;
   setScenes: (scenes: Scene[]) => void;
@@ -109,8 +113,11 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   generationStatus: 'idle' as const,
   currentGeneratingOrder: -1,
   failedOutlines: [],
+  recordingMode: false,
 
   // Actions
+  setRecordingMode: (recordingMode) => set({ recordingMode }),
+
   setStage: (stage) => {
     set((s) => ({
       stage,
@@ -317,6 +324,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       currentGeneratingOrder: -1,
       failedOutlines: [],
       generatingOutlines: [],
+      recordingMode: false,
     }));
     log.info('Store cleared');
   },

@@ -58,6 +58,12 @@ next-env.d.ts
 # generated data
 /data
 /logs
+/downloads
 
 # docs
 /docs
+
+# temporary test files
+api_test.py
+*.wav
+*.webm

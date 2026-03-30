@@ -25,6 +25,9 @@ export default {
 	plugins: [
 		resolve({ preferBuiltins: true }),
 		commonjs(),
-		typescript({ typescript: require("typescript") }),
+		typescript({ 
+			typescript: require("typescript"),
+			clean: true, // Fix EPERM issues on Windows by cleaning cache
+		}),
 	]
 };

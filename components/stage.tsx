@@ -10,6 +10,7 @@ import { SceneSidebar } from './stage/scene-sidebar';
 import { Header } from './header';
 import { CanvasArea } from '@/components/canvas/canvas-area';
 import { Roundtable } from '@/components/roundtable';
+import { useRecorder } from '@/lib/hooks/use-recorder';
 import { PlaybackEngine, computePlaybackView } from '@/lib/playback';
 import type { EngineMode, TriggerEvent, Effect } from '@/lib/playback';
 import { ActionEngine } from '@/lib/action/engine';
@@ -27,7 +28,7 @@ import {
   AlertDialogAction,
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Video } from 'lucide-react';
 import { VisuallyHidden } from 'radix-ui';
 
 /**
@@ -43,11 +44,25 @@ export function Stage({
   onRetryOutline?: (outlineId: string) => Promise<void>;
 }) {
   const { t } = useI18n();
-  const { mode, getCurrentScene, scenes, currentSceneId, setCurrentSceneId, generatingOutlines } =
-    useStageStore();
+  const {
+    mode,
+    getCurrentScene,
+    scenes,
+    currentSceneId,
+    setCurrentSceneId,
+    generatingOutlines,
+  } = useStageStore();
+  const recordingMode = useStageStore.use.recordingMode();
+  const setRecordingMode = useStageStore.use.setRecordingMode();
   const failedOutlines = useStageStore.use.failedOutlines();
 
   const currentScene = getCurrentScene();
+
+  // Hydration guard
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Layout state from settings store (persisted via localStorage)
   const sidebarCollapsed = useSettingsStore((s) => s.sidebarCollapsed);
@@ -56,6 +71,11 @@ export function Stage({
   const setChatAreaWidth = useSettingsStore((s) => s.setChatAreaWidth);
   const chatAreaCollapsed = useSettingsStore((s) => s.chatAreaCollapsed);
   const setChatAreaCollapsed = useSettingsStore((s) => s.setChatAreaCollapsed);
+
+  // Layout override in recording mode
+  const effectiveSidebarCollapsed = recordingMode ? true : sidebarCollapsed;
+  const effectiveChatAreaCollapsed = recordingMode ? true : chatAreaCollapsed;
+  const hideRoundtable = recordingMode;
 
   // PlaybackEngine state
   const [engineMode, setEngineMode] = useState<EngineMode>('idle');
@@ -107,6 +127,120 @@ export function Stage({
     [selectedAgentIds, t],
   );
 
+  const { isRecording, startRecording, stopRecording } = useRecorder();
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
+
+  // --- Refs ---
+  const engineRef = useRef<PlaybackEngine | null>(null);
+  const audioPlayerRef = useRef<AudioPlayer | null>(null);
+  if (typeof window !== 'undefined' && !audioPlayerRef.current) {
+    audioPlayerRef.current = createAudioPlayer();
+    // Pre-initialize audio context if possible
+    audioPlayerRef.current.getAudioStream();
+  }
+  const chatAreaRef = useRef<ChatAreaRef>(null);
+  const lectureSessionIdRef = useRef<string | null>(null);
+  const lectureActionCounterRef = useRef(0);
+  const discussionAbortRef = useRef<AbortController | null>(null);
+  // Guard to prevent double flash when manual stop triggers onDiscussionEnd
+  const manualStopRef = useRef(false);
+  // Monotonic counter incremented on each scene switch — used to discard stale SSE callbacks
+  const sceneEpochRef = useRef(0);
+  // When true, the next engine init will auto-start playback (for auto-play scene advance)
+  const autoStartRef = useRef(false);
+
+  // play/pause toggle
+  const handlePlayPause = useCallback(async () => {
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    const engineModeValue = engine.getMode();
+    if (engineModeValue === 'playing' || engineModeValue === 'live') {
+      engine.pause();
+      // Pause lecture buffer so text stops immediately
+      if (lectureSessionIdRef.current) {
+        chatAreaRef.current?.pauseBuffer(lectureSessionIdRef.current);
+      }
+    } else if (engineModeValue === 'paused') {
+      engine.resume();
+      // Resume lecture buffer
+      if (lectureSessionIdRef.current) {
+        chatAreaRef.current?.resumeBuffer(lectureSessionIdRef.current);
+      }
+    } else {
+      const wasCompleted = playbackCompleted;
+      setPlaybackCompleted(false);
+      // Starting playback - create/reuse lecture session
+      if (currentScene && chatAreaRef.current) {
+        const sessionId = await chatAreaRef.current.startLecture(currentScene.id);
+        lectureSessionIdRef.current = sessionId;
+      }
+      if (wasCompleted) {
+        // Restart from beginning (user clicked restart after completion)
+        lectureActionCounterRef.current = 0;
+        engine.start();
+      } else {
+        // Continue from current position (e.g. after discussion end)
+        engine.continuePlayback();
+      }
+    }
+  }, [currentScene, playbackCompleted]);
+
+  // Handle start recording
+  const handleStartRecording = useCallback(async () => {
+    if (!canvasAreaRef.current || !audioPlayerRef.current) return;
+
+    try {
+      // 1. Enter Fullscreen for the PPT area
+      if (canvasAreaRef.current.requestFullscreen) {
+        await canvasAreaRef.current.requestFullscreen();
+      }
+
+      // 2. Resume AudioContext if suspended (for TTS recording)
+      const stream = audioPlayerRef.current.getAudioStream();
+      if (stream && stream.getAudioTracks().length > 0) {
+        console.log('Audio stream active for recording');
+      }
+
+      // 3. Start recorder
+      await startRecording(canvasAreaRef.current, stream);
+
+      // 4. Set recording mode (hides UI, enables skipping)
+      setRecordingMode(true);
+
+      // 5. Restart playback from beginning
+      if (scenes.length > 0) {
+        if (currentSceneId === scenes[0].id) {
+          handlePlayPause();
+        } else {
+          setCurrentSceneId(scenes[0].id);
+          autoStartRef.current = true;
+        }
+      }
+    } catch (err) {
+      console.error('Recording flow error:', err);
+    }
+  }, [
+    startRecording,
+    setRecordingMode,
+    scenes,
+    currentSceneId,
+    setCurrentSceneId,
+    handlePlayPause,
+  ]);
+
+  // Handle stop recording or exit fullscreen
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement && isRecording) {
+        stopRecording();
+        setRecordingMode(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, [isRecording, stopRecording, setRecordingMode]);
+
   // Pick a student agent for discussion trigger (prioritize student > non-teacher > fallback)
   const pickStudentAgent = useCallback((): string => {
     const registry = useAgentRegistry.getState();
@@ -123,19 +257,6 @@ export function Stage({
     }
     return agents[0]?.id || 'default-1';
   }, [selectedAgentIds]);
-
-  const engineRef = useRef<PlaybackEngine | null>(null);
-  const audioPlayerRef = useRef(createAudioPlayer());
-  const chatAreaRef = useRef<ChatAreaRef>(null);
-  const lectureSessionIdRef = useRef<string | null>(null);
-  const lectureActionCounterRef = useRef(0);
-  const discussionAbortRef = useRef<AbortController | null>(null);
-  // Guard to prevent double flash when manual stop triggers onDiscussionEnd
-  const manualStopRef = useRef(false);
-  // Monotonic counter incremented on each scene switch — used to discard stale SSE callbacks
-  const sceneEpochRef = useRef(0);
-  // When true, the next engine init will auto-start playback (for auto-play scene advance)
-  const autoStartRef = useRef(false);
 
   /**
    * Soft-pause: interrupt current agent stream but keep the session active.
@@ -245,7 +366,12 @@ export function Stage({
     // Reset all roundtable/live state so scenes are fully isolated
     resetSceneState();
 
-    if (!currentScene || !currentScene.actions || currentScene.actions.length === 0) {
+    if (
+      !currentScene ||
+      !currentScene.actions ||
+      currentScene.actions.length === 0 ||
+      !audioPlayerRef.current
+    ) {
       engineRef.current = null;
       setEngineMode('idle');
 
@@ -354,6 +480,7 @@ export function Stage({
         return ids.includes(agentId);
       },
       getPlaybackSpeed: () => useSettingsStore.getState().playbackSpeed || 1,
+      isRecordingMode: () => useStageStore.getState().recordingMode,
       onComplete: () => {
         // lectureSpeech intentionally NOT cleared — last sentence stays visible
         // until scene transition (auto-play) or user restarts. Scene change
@@ -367,36 +494,60 @@ export function Stage({
         }
         // Auto-play: advance to next scene after a short pause
         const { autoPlayLecture } = useSettingsStore.getState();
-        if (autoPlayLecture) {
+        const { recordingMode } = useStageStore.getState();
+        if (autoPlayLecture || recordingMode) {
           setTimeout(() => {
             const stageState = useStageStore.getState();
-            if (!useSettingsStore.getState().autoPlayLecture) return;
+            if (!useSettingsStore.getState().autoPlayLecture && !stageState.recordingMode) return;
             const allScenes = stageState.scenes;
             const curId = stageState.currentSceneId;
             const idx = allScenes.findIndex((s) => s.id === curId);
+
             if (idx >= 0 && idx < allScenes.length - 1) {
-              const currentScene = allScenes[idx];
-              if (
-                currentScene.type === 'quiz' ||
-                currentScene.type === 'interactive' ||
-                currentScene.type === 'pbl'
-              ) {
-                return;
+              // In recording mode, find the next 'slide' scene, skip others
+              let nextIdx = idx + 1;
+              if (stageState.recordingMode) {
+                while (nextIdx < allScenes.length && allScenes[nextIdx].type !== 'slide') {
+                  nextIdx++;
+                }
               }
-              autoStartRef.current = true;
-              stageState.setCurrentSceneId(allScenes[idx + 1].id);
+
+              if (nextIdx < allScenes.length) {
+                const targetScene = allScenes[nextIdx];
+                // Non-slide scenes (quiz/interactive) are skipped in recording mode
+                // In normal auto-play, we stop at them.
+                if (
+                  !stageState.recordingMode &&
+                  (targetScene.type === 'quiz' ||
+                    targetScene.type === 'interactive' ||
+                    targetScene.type === 'pbl')
+                ) {
+                  return;
+                }
+                autoStartRef.current = true;
+                stageState.setCurrentSceneId(targetScene.id);
+              } else if (stageState.recordingMode) {
+                // No more slide scenes left in recording mode
+                stopRecording();
+                setRecordingMode(false);
+              } else if (stageState.generatingOutlines.length > 0) {
+                // Last scene exhausted but next is still generating — go to pending page
+                // Only if recording mode is off (or we can't record pending anyway)
+                if (!stageState.recordingMode) {
+                  autoStartRef.current = true;
+                  stageState.setCurrentSceneId(PENDING_SCENE_ID);
+                }
+              }
             } else if (idx === allScenes.length - 1 && stageState.generatingOutlines.length > 0) {
               // Last scene exhausted but next is still generating — go to pending page
-              const currentScene = allScenes[idx];
-              if (
-                currentScene.type === 'quiz' ||
-                currentScene.type === 'interactive' ||
-                currentScene.type === 'pbl'
-              ) {
-                return;
+              if (!stageState.recordingMode) {
+                autoStartRef.current = true;
+                stageState.setCurrentSceneId(PENDING_SCENE_ID);
               }
-              autoStartRef.current = true;
-              stageState.setCurrentSceneId(PENDING_SCENE_ID);
+            } else if (stageState.recordingMode) {
+              // Last scene in recording mode
+              stopRecording();
+              setRecordingMode(false);
             }
           }, 1500);
         }
@@ -429,7 +580,9 @@ export function Stage({
       if (engineRef.current) {
         engineRef.current.stop();
       }
-      audioPlayer.destroy();
+      if (audioPlayer) {
+        audioPlayer.destroy();
+      }
       if (discussionAbortRef.current) {
         discussionAbortRef.current.abort();
       }
@@ -439,13 +592,15 @@ export function Stage({
   // Sync mute state from settings store to audioPlayer
   const ttsMuted = useSettingsStore((s) => s.ttsMuted);
   useEffect(() => {
-    audioPlayerRef.current.setMuted(ttsMuted);
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.setMuted(ttsMuted);
+    }
   }, [ttsMuted]);
 
   // Sync volume from settings store to audioPlayer
   const ttsVolume = useSettingsStore((s) => s.ttsVolume);
   useEffect(() => {
-    if (!ttsMuted) {
+    if (audioPlayerRef.current && !ttsMuted) {
       audioPlayerRef.current.setVolume(ttsVolume);
     }
   }, [ttsVolume, ttsMuted]);
@@ -453,7 +608,9 @@ export function Stage({
   // Sync playback speed to audio player (for live-updating current audio)
   const playbackSpeed = useSettingsStore((s) => s.playbackSpeed);
   useEffect(() => {
-    audioPlayerRef.current.setPlaybackRate(playbackSpeed);
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.setPlaybackRate(playbackSpeed);
+    }
   }, [playbackSpeed]);
 
   /**
@@ -559,43 +716,6 @@ export function Stage({
     setPendingSceneId(null);
   }, []);
 
-  // play/pause toggle
-  const handlePlayPause = async () => {
-    const engine = engineRef.current;
-    if (!engine) return;
-
-    const mode = engine.getMode();
-    if (mode === 'playing' || mode === 'live') {
-      engine.pause();
-      // Pause lecture buffer so text stops immediately
-      if (lectureSessionIdRef.current) {
-        chatAreaRef.current?.pauseBuffer(lectureSessionIdRef.current);
-      }
-    } else if (mode === 'paused') {
-      engine.resume();
-      // Resume lecture buffer
-      if (lectureSessionIdRef.current) {
-        chatAreaRef.current?.resumeBuffer(lectureSessionIdRef.current);
-      }
-    } else {
-      const wasCompleted = playbackCompleted;
-      setPlaybackCompleted(false);
-      // Starting playback - create/reuse lecture session
-      if (currentScene && chatAreaRef.current) {
-        const sessionId = await chatAreaRef.current.startLecture(currentScene.id);
-        lectureSessionIdRef.current = sessionId;
-      }
-      if (wasCompleted) {
-        // Restart from beginning (user clicked restart after completion)
-        lectureActionCounterRef.current = 0;
-        engine.start();
-      } else {
-        // Continue from current position (e.g. after discussion end)
-        engine.continuePlayback();
-      }
-    }
-  };
-
   // previous scene (gated)
   const handlePreviousScene = () => {
     if (isPendingScene) {
@@ -676,7 +796,7 @@ export function Stage({
     <div className="flex-1 flex overflow-hidden bg-gray-50 dark:bg-gray-900">
       {/* Scene Sidebar */}
       <SceneSidebar
-        collapsed={sidebarCollapsed}
+        collapsed={effectiveSidebarCollapsed}
         onCollapseChange={setSidebarCollapsed}
         onSceneSelect={gatedSceneSwitch}
         onRetryOutline={onRetryOutline}
@@ -685,10 +805,22 @@ export function Stage({
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0 relative">
         {/* Header */}
-        <Header currentSceneTitle={currentScene?.title || ''} />
+        <Header
+          currentSceneTitle={currentScene?.title || ''}
+          onStartRecording={handleStartRecording}
+          onStopRecording={() => {
+            if (document.fullscreenElement) {
+              document.exitFullscreen();
+            }
+            stopRecording();
+            setRecordingMode(false);
+          }}
+          isRecording={isRecording}
+        />
 
         {/* Canvas Area */}
         <div
+          ref={canvasAreaRef}
           className="overflow-hidden relative flex-1 min-h-0 isolate"
           style={{
             height: sceneViewerHeight,
@@ -705,10 +837,10 @@ export function Stage({
               chatIsStreaming || isTopicPending || engineMode === 'live' || !!chatSessionType
             }
             whiteboardOpen={whiteboardOpen}
-            sidebarCollapsed={sidebarCollapsed}
-            chatCollapsed={chatAreaCollapsed}
-            onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-            onToggleChat={() => setChatAreaCollapsed(!chatAreaCollapsed)}
+             sidebarCollapsed={effectiveSidebarCollapsed}
+             chatCollapsed={effectiveChatAreaCollapsed}
+             onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
+             onToggleChat={() => setChatAreaCollapsed(!chatAreaCollapsed)}
             onPrevSlide={handlePreviousScene}
             onNextSlide={handleNextScene}
             onPlayPause={handlePlayPause}
@@ -732,7 +864,7 @@ export function Stage({
         </div>
 
         {/* Roundtable Area */}
-        {mode === 'playback' && (
+        {mode === 'playback' && !hideRoundtable && (
           <Roundtable
             mode={mode}
             initialParticipants={participants}
@@ -817,8 +949,8 @@ export function Stage({
             currentSceneIndex={currentSceneIndex}
             scenesCount={totalScenesCount}
             whiteboardOpen={whiteboardOpen}
-            sidebarCollapsed={sidebarCollapsed}
-            chatCollapsed={chatAreaCollapsed}
+            sidebarCollapsed={effectiveSidebarCollapsed}
+            chatCollapsed={effectiveChatAreaCollapsed}
             onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
             onToggleChat={() => setChatAreaCollapsed(!chatAreaCollapsed)}
             onPrevSlide={handlePreviousScene}
@@ -833,7 +965,7 @@ export function Stage({
         ref={chatAreaRef}
         width={chatAreaWidth}
         onWidthChange={setChatAreaWidth}
-        collapsed={chatAreaCollapsed}
+        collapsed={effectiveChatAreaCollapsed}
         onCollapseChange={setChatAreaCollapsed}
         activeBubbleId={activeBubbleId}
         onActiveBubble={(id) => setActiveBubbleId(id)}

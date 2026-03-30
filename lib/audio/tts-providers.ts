@@ -226,12 +226,12 @@ async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTS
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       model: 'glm-tts',
       input: text,
-      voice: config.voice,
+      voice: config.voice || 'tongtong', // Default to a known GLM voice
       speed: config.speed || 1.0,
       volume: 1.0,
       response_format: 'wav',
@@ -245,6 +245,9 @@ async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTS
       const errorJson = JSON.parse(errorText);
       if (errorJson.error?.message) {
         errorMessage = `GLM TTS API error: ${errorJson.error.message} (code: ${errorJson.error.code})`;
+      } else if (errorJson.message) {
+        // Handle cases where error is not in error.message (Zhipu V4 can be like this)
+        errorMessage = `GLM TTS API error: ${errorJson.message} (code: ${errorJson.code})`;
       }
     } catch {
       // If not JSON, use the text as is
@@ -253,6 +256,14 @@ async function generateGLMTTS(config: TTSModelConfig, text: string): Promise<TTS
   }
 
   const arrayBuffer = await response.arrayBuffer();
+  
+  // Check if response is actually audio or JSON error disguised as 200 (unlikely but possible)
+  const contentType = response.headers.get('Content-Type');
+  if (contentType && contentType.includes('application/json')) {
+    const json = JSON.parse(new TextDecoder().decode(arrayBuffer));
+    throw new Error(`GLM TTS error (JSON response): ${JSON.stringify(json)}`);
+  }
+
   return {
     audio: new Uint8Array(arrayBuffer),
     format: 'wav',

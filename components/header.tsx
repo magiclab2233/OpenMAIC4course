@@ -10,6 +10,7 @@ import {
   Download,
   FileDown,
   Package,
+  Video,
 } from 'lucide-react';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { useTheme } from '@/lib/hooks/use-theme';
@@ -24,9 +25,17 @@ import { useExportPPTX } from '@/lib/export/use-export-pptx';
 
 interface HeaderProps {
   readonly currentSceneTitle: string;
+  readonly onStartRecording?: () => void;
+  readonly onStopRecording?: () => void;
+  readonly isRecording?: boolean;
 }
 
-export function Header({ currentSceneTitle }: HeaderProps) {
+export function Header({
+  currentSceneTitle,
+  onStartRecording,
+  onStopRecording,
+  isRecording,
+}: HeaderProps) {
   const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
   const router = useRouter();
@@ -275,6 +284,17 @@ export function Header({ currentSceneTitle }: HeaderProps) {
               >
                 <FileDown className="w-4 h-4 text-gray-400 shrink-0" />
                 <span>{t('export.pptx')}</span>
+              </button>
+              <button
+                onClick={() => {
+                  setExportMenuOpen(false);
+                  onStartRecording?.();
+                }}
+                disabled={isRecording}
+                className="w-full px-4 py-2.5 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors flex items-center gap-2.5"
+              >
+                <Video className="w-4 h-4 text-gray-400 shrink-0" />
+                <span>导出视频课程</span>
               </button>
               <button
                 onClick={() => {

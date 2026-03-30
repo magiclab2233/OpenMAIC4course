@@ -13,11 +13,15 @@ import {
   Volume2,
   VolumeX,
   Repeat,
+  Download,
+  Loader2,
+  ClipboardList,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useStageStore } from '@/lib/store';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { useExportPPTX } from '@/lib/export/use-export-pptx';
 
 export interface CanvasToolbarProps {
   readonly currentSceneIndex: number;
@@ -111,6 +115,8 @@ export function CanvasToolbar({
   const whiteboardElementCount = useStageStore(
     (s) => s.stage?.whiteboard?.[0]?.elements?.length || 0,
   );
+
+  const { exporting, exportPPTX, exportQuizMarkdown } = useExportPPTX();
 
   // Volume slider hover state
   const [volumeHover, setVolumeHover] = useState(false);
@@ -377,8 +383,64 @@ export function CanvasToolbar({
               <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-violet-500 dark:bg-violet-400 rounded-full" />
             )}
           </button>
-        </div>
-      </div>
+
+          <CtrlDivider />
+
+          {/* Export PPTX */}
+          <TooltipProvider delayDuration={0}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={exportPPTX}
+                  disabled={exporting}
+                  className={cn(
+                    ctrlBtn,
+                    'w-8 h-6',
+                    exporting
+                      ? 'text-violet-600 dark:text-violet-400'
+                      : 'text-gray-500 dark:text-gray-400',
+                  )}
+                  aria-label="Export PPTX"
+                >
+                  {exporting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">
+                 {t('export.exportPPTX') || '导出 PPT'}
+               </TooltipContent>
+             </Tooltip>
+           </TooltipProvider>
+
+           {/* Export Quiz */}
+           <TooltipProvider delayDuration={0}>
+             <Tooltip>
+               <TooltipTrigger asChild>
+                 <button
+                   onClick={exportQuizMarkdown}
+                   disabled={exporting}
+                   className={cn(
+                     ctrlBtn,
+                     'w-8 h-6',
+                     exporting
+                       ? 'text-violet-600 dark:text-violet-400'
+                       : 'text-gray-500 dark:text-gray-400',
+                   )}
+                   aria-label="Export Quiz"
+                 >
+                   <ClipboardList className="w-3.5 h-3.5" />
+                 </button>
+               </TooltipTrigger>
+               <TooltipContent side="top" className="text-xs">
+                 {t('export.exportQuiz') || '导出题库'}
+               </TooltipContent>
+             </Tooltip>
+           </TooltipProvider>
+         </div>
+       </div>
 
       {/* ── Right: chat toggle ── */}
       <div className="flex items-center justify-end gap-px shrink-0 pr-1">

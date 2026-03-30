@@ -58,5 +58,8 @@ export interface PlaybackEngineCallbacks {
   /** Get current playback speed multiplier (e.g. 1, 1.5, 2) */
   getPlaybackSpeed?: () => number;
 
+  /** Check if the engine is in recording mode (skips discussions) */
+  isRecordingMode?: () => boolean;
+
   onComplete?: () => void;
 }
