@@ -14,7 +14,7 @@ import { useRecorder } from '@/lib/hooks/use-recorder';
 import { PlaybackEngine, computePlaybackView } from '@/lib/playback';
 import type { EngineMode, TriggerEvent, Effect } from '@/lib/playback';
 import { ActionEngine } from '@/lib/action/engine';
-import { createAudioPlayer } from '@/lib/utils/audio-player';
+import { createAudioPlayer, AudioPlayer } from '@/lib/utils/audio-player';
 import type { Action, DiscussionAction, SpeechAction } from '@/lib/types/action';
 // Playback state persistence removed — refresh always starts from the beginning
 import { ChatArea, type ChatAreaRef } from '@/components/chat/chat-area';

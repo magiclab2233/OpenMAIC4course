@@ -339,11 +339,11 @@ function ensureBuiltInProviders(state: Partial<SettingsState>): void {
       state.providersConfig![providerId] = {
         ...existing,
         models: mergedModels,
-        name: existing.name || provider.name,
-        type: existing.type || provider.type,
-        defaultBaseUrl: existing.defaultBaseUrl || provider.defaultBaseUrl,
+        name: provider.name || existing.name,
+        type: provider.type, // Always use code-defined type
+        defaultBaseUrl: provider.defaultBaseUrl || existing.defaultBaseUrl,
         icon: provider.icon || existing.icon,
-        requiresApiKey: existing.requiresApiKey ?? provider.requiresApiKey,
+        requiresApiKey: provider.requiresApiKey ?? existing.requiresApiKey,
         isBuiltIn: existing.isBuiltIn ?? true,
       };
     }

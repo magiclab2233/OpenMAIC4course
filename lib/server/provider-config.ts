@@ -198,11 +198,11 @@ function logConfig(config: ServerConfig, label: string): void {
     Object.keys(config.video).length,
     Object.keys(config.webSearch).length,
   ];
-  if (counts.some((c) => c > 0)) {
-    log.info(
-      `[ServerProviderConfig] Loaded (${label}): ${counts[0]} LLM, ${counts[1]} TTS, ${counts[2]} ASR, ${counts[3]} PDF, ${counts[4]} Image, ${counts[5]} Video, ${counts[6]} WebSearch providers`,
-    );
-  }
+  // Debug: list all providers
+  const providerNames = Object.keys(config.providers).join(', ');
+  log.info(
+    `[ServerProviderConfig] Loaded (${label}): ${counts[0]} LLM [${providerNames}], ${counts[1]} TTS, ${counts[2]} ASR, ${counts[3]} PDF, ${counts[4]} Image, ${counts[5]} Video, ${counts[6]} WebSearch providers`,
+  );
 }
 
 function getConfig(): ServerConfig {
