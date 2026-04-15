@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import { useStageStore } from '@/lib/store/stage';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { useSettingsStore } from '@/lib/store/settings';
@@ -320,13 +320,24 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
   const fetchAbortRef = useRef<AbortController | null>(null);
   const lastParamsRef = useRef<GenerationParams | null>(null);
   const generateRemainingRef = useRef<((params: GenerationParams) => Promise<void>) | null>(null);
+  const autoRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const store = useStageStore;
 
   const generateRemaining = useCallback(
     async (params: GenerationParams) => {
       lastParamsRef.current = params;
-      if (generatingRef.current) return;
+      // eslint-disable-next-line no-console
+      console.log('[Generation] generateRemaining called, params saved:', { 
+        hasPdfImages: !!params.pdfImages,
+        hasStageInfo: !!params.stageInfo,
+        hasAgents: !!params.agents 
+      });
+      if (generatingRef.current) {
+        // eslint-disable-next-line no-console
+        console.log('[Generation] Already generating, skipping...');
+        return;
+      }
       generatingRef.current = true;
       abortRef.current = false;
       const removeGeneratingOutline = (outlineId: string) => {
@@ -414,7 +425,36 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               break;
             }
             store.getState().addFailedOutline(outline);
-            options.onSceneFailed?.(outline, contentResult.error || 'Content generation failed');
+            
+            // Provide user-friendly error message for server overload
+            let errorMessage = contentResult.error || 'Content generation failed';
+            if (errorMessage.includes('high load') || errorMessage.includes('2064')) {
+              errorMessage = 'AI server is busy. Will auto-retry in 3 minutes...';
+            }
+            
+            options.onSceneFailed?.(outline, errorMessage);
+            
+            // Set up auto-retry after 3 minutes
+            if (!autoRetryTimerRef.current) {
+              log.info(`Scheduling auto-retry for failed outline "${outline.title}" in 3 minutes...`);
+              // eslint-disable-next-line no-console
+              console.log(`[Auto-Retry] Scheduled in 3 minutes for: "${outline.title}"`);
+              autoRetryTimerRef.current = setTimeout(() => {
+                log.info(`Auto-retrying failed outline: "${outline.title}"`);
+                // eslint-disable-next-line no-console
+                console.log(`[Auto-Retry] Executing retry for: "${outline.title}"`);
+                autoRetryTimerRef.current = null;
+                if (lastParamsRef.current) {
+                  // eslint-disable-next-line no-console
+                  console.log('[Auto-Retry] Calling generateRemaining...');
+                  generateRemainingRef.current?.(lastParamsRef.current);
+                } else {
+                  // eslint-disable-next-line no-console
+                  console.warn('[Auto-Retry] No lastParamsRef available!');
+                }
+              }, 3 * 60 * 1000); // 3 minutes
+            }
+            
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
             break;
@@ -477,7 +517,27 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
               break;
             }
             store.getState().addFailedOutline(outline);
-            options.onSceneFailed?.(outline, actionsResult.error || 'Actions generation failed');
+            
+            // Provide user-friendly error message for server overload
+            let errorMessage = actionsResult.error || 'Actions generation failed';
+            if (errorMessage.includes('high load') || errorMessage.includes('2064')) {
+              errorMessage = 'AI server is busy. Will auto-retry in 3 minutes...';
+            }
+            
+            options.onSceneFailed?.(outline, errorMessage);
+            
+            // Set up auto-retry after 3 minutes
+            if (!autoRetryTimerRef.current) {
+              log.info(`Scheduling auto-retry for failed outline "${outline.title}" in 3 minutes...`);
+              autoRetryTimerRef.current = setTimeout(() => {
+                log.info(`Auto-retrying failed outline: "${outline.title}"`);
+                autoRetryTimerRef.current = null;
+                if (lastParamsRef.current) {
+                  generateRemainingRef.current?.(lastParamsRef.current);
+                }
+              }, 3 * 60 * 1000); // 3 minutes
+            }
+            
             store.getState().setGenerationStatus('paused');
             pausedByFailureOrAbort = true;
             break;
@@ -485,9 +545,18 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
         }
 
         if (!abortRef.current && !pausedByFailureOrAbort) {
+          // eslint-disable-next-line no-console
+          console.log('[Generation] All scenes completed successfully! Calling onComplete...');
           store.getState().setGenerationStatus('completed');
           store.getState().setGeneratingOutlines([]);
           options.onComplete?.();
+        } else {
+          // eslint-disable-next-line no-console
+          console.log('[Generation] Generation ended:', { 
+            aborted: abortRef.current, 
+            pausedByFailureOrAbort,
+            willCallOnComplete: false 
+          });
         }
       } catch (err: unknown) {
         // AbortError is expected when stop() is called — don't treat as failure
@@ -513,6 +582,12 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     store.getState().bumpGenerationEpoch();
     fetchAbortRef.current?.abort();
     mediaAbortRef.current?.abort();
+    // Clear auto-retry timer
+    if (autoRetryTimerRef.current) {
+      clearTimeout(autoRetryTimerRef.current);
+      autoRetryTimerRef.current = null;
+      log.info('Auto-retry timer cleared');
+    }
   }, [store]);
 
   const isGenerating = useCallback(() => generatingRef.current, []);
@@ -614,6 +689,17 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
     },
     [store],
   );
+
+  // Cleanup auto-retry timer on unmount
+  useEffect(() => {
+    return () => {
+      if (autoRetryTimerRef.current) {
+        clearTimeout(autoRetryTimerRef.current);
+        autoRetryTimerRef.current = null;
+        log.info('Auto-retry timer cleared on unmount');
+      }
+    };
+  }, []);
 
   return { generateRemaining, retrySingleOutline, stop, isGenerating };
 }

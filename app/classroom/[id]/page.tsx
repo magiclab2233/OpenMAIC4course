@@ -5,18 +5,21 @@ import { ThemeProvider } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { loadImageMapping } from '@/lib/utils/image-storage';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useSceneGenerator } from '@/lib/hooks/use-scene-generator';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { createLogger } from '@/lib/logger';
 import { MediaStageProvider } from '@/lib/contexts/media-stage-context';
 import { generateMediaForOutlines } from '@/lib/media/media-orchestrator';
+import { toast } from 'sonner';
 
 const log = createLogger('Classroom');
 
 export default function ClassroomDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const classroomId = params?.id as string;
+  const autoPlayWhenReady = searchParams.get('autoPlay') === 'true';
 
   const { loadFromStorage } = useStageStore();
 
@@ -24,10 +27,39 @@ export default function ClassroomDetailPage() {
   const [error, setError] = useState<string | null>(null);
 
   const generationStartedRef = useRef(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const generatedCountRef = useRef(0);
+  const totalPendingRef = useRef(0);
 
   const { generateRemaining, retrySingleOutline, stop } = useSceneGenerator({
     onComplete: () => {
+      const totalScenes = totalPendingRef.current;
+      const generatedScenes = generatedCountRef.current;
+      
+      // Console output for Next.js
+      // eslint-disable-next-line no-console
+      console.log('========================================');
+      // eslint-disable-next-line no-console
+      console.log('🎉 ALL SCENES GENERATION COMPLETED! 🎉');
+      // eslint-disable-next-line no-console
+      console.log(`📊 Total scenes: ${generatedScenes}/${totalScenes}`);
+      // eslint-disable-next-line no-console
+      console.log('✅ Triggering auto-playback for OBS recording...');
+      // eslint-disable-next-line no-console
+      console.log('========================================');
+      
       log.info('[Classroom] All scenes generated');
+      toast.success(`All scenes generated successfully! (${generatedScenes}/${totalScenes})`);
+      setGenerationError(null);
+    },
+    onSceneGenerated: (scene, index) => {
+      generatedCountRef.current++;
+      log.info(`[Classroom] Scene ${index + 1} generated (${generatedCountRef.current}/${totalPendingRef.current})`);
+    },
+    onSceneFailed: (outline, error) => {
+      log.error(`[Classroom] Scene generation failed for "${outline.title}":`, error);
+      setGenerationError(`Failed to generate "${outline.title}": ${error}`);
+      toast.error(`Scene generation failed: ${outline.title}. ${error}`);
     },
   });
 
@@ -171,7 +203,7 @@ export default function ClassroomDetailPage() {
               </div>
             </div>
           ) : (
-            <Stage onRetryOutline={retrySingleOutline} />
+            <Stage onRetryOutline={retrySingleOutline} autoPlayWhenReady={autoPlayWhenReady} />
           )}
         </div>
       </MediaStageProvider>

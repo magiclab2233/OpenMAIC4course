@@ -18,6 +18,7 @@ import {
   Monitor,
   BotOff,
   ChevronUp,
+  Rocket,
 } from 'lucide-react';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { createLogger } from '@/lib/logger';
@@ -516,6 +517,23 @@ function HomePage() {
         >
           {t('home.slogan')}
         </motion.p>
+
+        {/* ── Auto Course Entry ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="mb-6"
+        >
+          <button
+            onClick={() => router.push('/auto-course')}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 text-white text-sm font-medium hover:opacity-90 shadow-md hover:shadow-lg transition-all"
+          >
+            <Rocket className="w-4 h-4" />
+            <span>自动做课</span>
+            <span className="text-xs opacity-70">(上传多课时PDF)</span>
+          </button>
+        </motion.div>
 
         {/* ── Unified input area ── */}
         <motion.div

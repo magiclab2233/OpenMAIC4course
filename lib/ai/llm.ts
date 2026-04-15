@@ -270,6 +270,34 @@ export interface LLMRetryOptions {
   /** Custom validation function. Return true to accept the result, false to retry.
    *  Default: checks that response text is non-empty. */
   validate?: (text: string) => boolean;
+  /** Enable exponential backoff for server overload errors (default: true) */
+  enableBackoff?: boolean;
+}
+
+/**
+ * Check if error is a server overload error that should be retried with backoff
+ */
+function isServerOverloadError(error: unknown): boolean {
+  if (!error) return false;
+  const errorMessage = String(error);
+  return (
+    errorMessage.includes('high load') ||
+    errorMessage.includes('2064') ||
+    errorMessage.includes('rate limit') ||
+    errorMessage.includes('too many requests') ||
+    errorMessage.includes('429') ||
+    errorMessage.includes('503') ||
+    errorMessage.includes('502') ||
+    errorMessage.includes('504')
+  );
+}
+
+/**
+ * Calculate delay for exponential backoff
+ */
+function getBackoffDelay(attempt: number, baseDelay = 2000): number {
+  // Exponential backoff: 2s, 4s, 8s, 16s...
+  return Math.min(baseDelay * Math.pow(2, attempt - 1), 30000); // Max 30s
 }
 
 const DEFAULT_VALIDATE = (text: string) => text.trim().length > 0;
@@ -291,6 +319,7 @@ export async function callLLM<T extends GenerateTextParams>(
 ): Promise<GenerateTextResult<any, any>> {
   const maxAttempts = (retryOptions?.retries ?? 0) + 1;
   const validate = retryOptions?.validate ?? (maxAttempts > 1 ? DEFAULT_VALIDATE : undefined);
+  const enableBackoff = retryOptions?.enableBackoff ?? true;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let lastResult: GenerateTextResult<any, any> | undefined;
@@ -321,9 +350,19 @@ export async function callLLM<T extends GenerateTextParams>(
       return result;
     } catch (error) {
       lastError = error;
+      const isOverload = isServerOverloadError(error);
 
       if (attempt < maxAttempts) {
-        log.warn(`[${source}] Call failed (attempt ${attempt}/${maxAttempts}), retrying...`, error);
+        if (isOverload && enableBackoff) {
+          const delay = getBackoffDelay(attempt);
+          log.warn(
+            `[${source}] Server overloaded (attempt ${attempt}/${maxAttempts}), waiting ${delay}ms before retry...`,
+            error,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else {
+          log.warn(`[${source}] Call failed (attempt ${attempt}/${maxAttempts}), retrying...`, error);
+        }
         continue;
       }
     }

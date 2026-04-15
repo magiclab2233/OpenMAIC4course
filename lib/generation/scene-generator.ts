@@ -456,9 +456,97 @@ function processLatexElements(
 }
 
 /**
- * Generate slide content
+ * Check if error is a server overload error
+ */
+function isServerOverloadError(error: unknown): boolean {
+  if (!error) return false;
+  const errorMessage = String(error);
+  return (
+    errorMessage.includes('high load') ||
+    errorMessage.includes('2064') ||
+    errorMessage.includes('rate limit') ||
+    errorMessage.includes('too many requests') ||
+    errorMessage.includes('429') ||
+    errorMessage.includes('503') ||
+    errorMessage.includes('502') ||
+    errorMessage.includes('504')
+  );
+}
+
+/**
+ * Calculate exponential backoff delay
+ */
+function getBackoffDelay(attempt: number, baseDelay = 2000): number {
+  // Exponential backoff: 2s, 4s, 8s, 16s...
+  return Math.min(baseDelay * Math.pow(2, attempt - 1), 30000); // Max 30s
+}
+
+/**
+ * Generate slide content with auto-retry on failure
  */
 async function generateSlideContent(
+  outline: SceneOutline,
+  aiCall: AICallFn,
+  assignedImages?: PdfImage[],
+  imageMapping?: ImageMapping,
+  visionEnabled?: boolean,
+  generatedMediaMapping?: ImageMapping,
+  agents?: AgentInfo[],
+): Promise<GeneratedSlideContent | null> {
+  const MAX_RETRIES = 5; // Increased for server overload scenarios
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await generateSlideContentOnce(
+        outline,
+        aiCall,
+        assignedImages,
+        imageMapping,
+        visionEnabled,
+        generatedMediaMapping,
+        agents,
+      );
+
+      if (result) {
+        if (attempt > 1) {
+          log.info(`Successfully generated slide "${outline.title}" after ${attempt} attempts`);
+        }
+        return result;
+      }
+
+      // Generation returned null (parse failed)
+      if (attempt < MAX_RETRIES) {
+        log.warn(`Slide "${outline.title}" generation failed (attempt ${attempt}/${MAX_RETRIES}), retrying...`);
+        // Add small delay before retry
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      
+      if (attempt < MAX_RETRIES) {
+        const isOverload = isServerOverloadError(error);
+        const delay = isOverload ? getBackoffDelay(attempt, 3000) : 1000;
+        
+        if (isOverload) {
+          log.warn(`Slide "${outline.title}" server overloaded (attempt ${attempt}/${MAX_RETRIES}), waiting ${delay}ms before retry...`);
+        } else {
+          log.warn(`Slide "${outline.title}" generation error (attempt ${attempt}/${MAX_RETRIES}): ${lastError.message}, retrying...`);
+        }
+        
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  log.error(`Slide "${outline.title}" generation failed after ${MAX_RETRIES} attempts`, lastError);
+  return null;
+}
+
+/**
+ * Generate slide content (single attempt)
+ */
+async function generateSlideContentOnce(
   outline: SceneOutline,
   aiCall: AICallFn,
   assignedImages?: PdfImage[],
@@ -633,49 +721,76 @@ async function generateQuizContent(
   outline: SceneOutline,
   aiCall: AICallFn,
 ): Promise<GeneratedQuizContent | null> {
+  const MAX_RETRIES = 4; // Increased for server overload scenarios
   const quizConfig = outline.quizConfig || {
     questionCount: 3,
     difficulty: 'medium',
     questionTypes: ['single'],
   };
 
-  const prompts = buildPrompt(PROMPT_IDS.QUIZ_CONTENT, {
-    title: outline.title,
-    description: outline.description,
-    keyPoints: (outline.keyPoints || []).map((p, i) => `${i + 1}. ${p}`).join('\n'),
-    questionCount: quizConfig.questionCount,
-    difficulty: quizConfig.difficulty,
-    questionTypes: quizConfig.questionTypes.join(', '),
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.warn(`Retrying quiz content generation for "${outline.title}" (attempt ${attempt + 1}/${MAX_RETRIES + 1})...`);
+    }
 
-  if (!prompts) {
-    return null;
+    try {
+      const prompts = buildPrompt(PROMPT_IDS.QUIZ_CONTENT, {
+        title: outline.title,
+        description: outline.description,
+        keyPoints: (outline.keyPoints || []).map((p, i) => `${i + 1}. ${p}`).join('\n'),
+        questionCount: quizConfig.questionCount,
+        difficulty: quizConfig.difficulty,
+        questionTypes: quizConfig.questionTypes.join(', '),
+      });
+
+      if (!prompts) {
+        return null;
+      }
+
+      log.debug(`Generating quiz content for: ${outline.title}`);
+      const response = await aiCall(prompts.system, prompts.user);
+      const generatedQuestions = parseJsonResponse<QuizQuestion[]>(response);
+
+      if (!generatedQuestions || !Array.isArray(generatedQuestions)) {
+        throw new Error(`Failed to parse AI response for: ${outline.title}`);
+      }
+
+      log.debug(`Got ${generatedQuestions.length} questions for: ${outline.title}`);
+
+      // Ensure each question has an ID and normalize options format
+      const questions: QuizQuestion[] = generatedQuestions.map((q) => {
+        const isText = q.type === 'short_answer';
+        return {
+          ...q,
+          id: q.id || `q_${nanoid(8)}`,
+          options: isText ? undefined : normalizeQuizOptions(q.options),
+          answer: isText ? undefined : normalizeQuizAnswer(q as unknown as Record<string, unknown>),
+          hasAnswer: isText ? false : true,
+        };
+      });
+
+      return { questions };
+    } catch (error) {
+      if (attempt < MAX_RETRIES) {
+        const isOverload = isServerOverloadError(error);
+        const delay = isOverload ? getBackoffDelay(attempt + 1, 3000) : 1000;
+        
+        if (isOverload) {
+          log.warn(`Quiz generation server overloaded for "${outline.title}", waiting ${delay}ms before retry...`);
+        } else {
+          log.warn(`Quiz content generation failed for "${outline.title}", will retry:`, error);
+        }
+        
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      } else {
+        log.error(`Quiz content generation failed for "${outline.title}" after ${MAX_RETRIES + 1} attempts`);
+        return null;
+      }
+    }
   }
 
-  log.debug(`Generating quiz content for: ${outline.title}`);
-  const response = await aiCall(prompts.system, prompts.user);
-  const generatedQuestions = parseJsonResponse<QuizQuestion[]>(response);
-
-  if (!generatedQuestions || !Array.isArray(generatedQuestions)) {
-    log.error(`Failed to parse AI response for: ${outline.title}`);
-    return null;
-  }
-
-  log.debug(`Got ${generatedQuestions.length} questions for: ${outline.title}`);
-
-  // Ensure each question has an ID and normalize options format
-  const questions: QuizQuestion[] = generatedQuestions.map((q) => {
-    const isText = q.type === 'short_answer';
-    return {
-      ...q,
-      id: q.id || `q_${nanoid(8)}`,
-      options: isText ? undefined : normalizeQuizOptions(q.options),
-      answer: isText ? undefined : normalizeQuizAnswer(q as unknown as Record<string, unknown>),
-      hasAnswer: isText ? false : true,
-    };
-  });
-
-  return { questions };
+  return null;
 }
 
 /**
@@ -737,6 +852,7 @@ async function generateInteractiveContent(
   aiCall: AICallFn,
   language: 'zh-CN' | 'en-US' = 'zh-CN',
 ): Promise<GeneratedInteractiveContent | null> {
+  const MAX_RETRIES = 4; // Increased for server overload scenarios
   const config = outline.interactiveConfig!;
 
   // Step 1: Scientific modeling (with fallback on failure)
@@ -784,39 +900,65 @@ async function generateInteractiveContent(
     scientificConstraints = lines.join('\n');
   }
 
-  // Step 2: HTML generation
-  const htmlPrompts = buildPrompt(PROMPT_IDS.INTERACTIVE_HTML, {
-    conceptName: config.conceptName,
-    subject: config.subject || '',
-    conceptOverview: config.conceptOverview,
-    keyPoints: (outline.keyPoints || []).map((p, i) => `${i + 1}. ${p}`).join('\n'),
-    scientificConstraints,
-    designIdea: config.designIdea,
-    language,
-  });
+  // Step 2: HTML generation (with retry logic)
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.warn(`Retrying interactive HTML generation for "${outline.title}" (attempt ${attempt + 1}/${MAX_RETRIES + 1})...`);
+    }
 
-  if (!htmlPrompts) {
-    log.error(`Failed to build HTML prompt for: ${outline.title}`);
-    return null;
+    try {
+      const htmlPrompts = buildPrompt(PROMPT_IDS.INTERACTIVE_HTML, {
+        conceptName: config.conceptName,
+        subject: config.subject || '',
+        conceptOverview: config.conceptOverview,
+        keyPoints: (outline.keyPoints || []).map((p, i) => `${i + 1}. ${p}`).join('\n'),
+        scientificConstraints,
+        designIdea: config.designIdea,
+        language,
+      });
+
+      if (!htmlPrompts) {
+        log.error(`Failed to build HTML prompt for: ${outline.title}`);
+        return null;
+      }
+
+      log.info(`Step 2: Generating HTML for: ${outline.title}`);
+      const htmlResponse = await aiCall(htmlPrompts.system, htmlPrompts.user);
+      // Extract HTML from response
+      const rawHtml = extractHtml(htmlResponse);
+      if (!rawHtml) {
+        throw new Error(`Failed to extract HTML from response for: ${outline.title}`);
+      }
+
+      // Step 3: Post-process HTML (LaTeX delimiter conversion + KaTeX injection)
+      const processedHtml = postProcessInteractiveHtml(rawHtml);
+      log.info(`Post-processed HTML (${processedHtml.length} chars) for: ${outline.title}`);
+
+      return {
+        html: processedHtml,
+        scientificModel,
+      };
+    } catch (error) {
+      if (attempt < MAX_RETRIES) {
+        const isOverload = isServerOverloadError(error);
+        const delay = isOverload ? getBackoffDelay(attempt + 1, 3000) : 1000;
+        
+        if (isOverload) {
+          log.warn(`Interactive HTML generation server overloaded for "${outline.title}", waiting ${delay}ms before retry...`);
+        } else {
+          log.warn(`Interactive HTML generation failed for "${outline.title}", will retry:`, error);
+        }
+        
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      } else {
+        log.error(`Interactive HTML generation failed for "${outline.title}" after ${MAX_RETRIES + 1} attempts`);
+        return null;
+      }
+    }
   }
 
-  log.info(`Step 2: Generating HTML for: ${outline.title}`);
-  const htmlResponse = await aiCall(htmlPrompts.system, htmlPrompts.user);
-  // Extract HTML from response
-  const rawHtml = extractHtml(htmlResponse);
-  if (!rawHtml) {
-    log.error(`Failed to extract HTML from response for: ${outline.title}`);
-    return null;
-  }
-
-  // Step 3: Post-process HTML (LaTeX delimiter conversion + KaTeX injection)
-  const processedHtml = postProcessInteractiveHtml(rawHtml);
-  log.info(`Post-processed HTML (${processedHtml.length} chars) for: ${outline.title}`);
-
-  return {
-    html: processedHtml,
-    scientificModel,
-  };
+  return null;
 }
 
 /**

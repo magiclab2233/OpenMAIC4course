@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useStageStore } from '@/lib/store';
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
 import { useCanvasStore } from '@/lib/store/canvas';
+import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useSettingsStore } from '@/lib/store/settings';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { SceneSidebar } from './stage/scene-sidebar';
@@ -14,7 +16,7 @@ import { useRecorder } from '@/lib/hooks/use-recorder';
 import { PlaybackEngine, computePlaybackView } from '@/lib/playback';
 import type { EngineMode, TriggerEvent, Effect } from '@/lib/playback';
 import { ActionEngine } from '@/lib/action/engine';
-import { createAudioPlayer, AudioPlayer } from '@/lib/utils/audio-player';
+import { createAudioPlayer, type AudioPlayer } from '@/lib/utils/audio-player';
 import type { Action, DiscussionAction, SpeechAction } from '@/lib/types/action';
 // Playback state persistence removed — refresh always starts from the beginning
 import { ChatArea, type ChatAreaRef } from '@/components/chat/chat-area';
@@ -30,6 +32,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { AlertTriangle, Video } from 'lucide-react';
 import { VisuallyHidden } from 'radix-ui';
+import { toast } from 'sonner';
 
 /**
  * Stage Component
@@ -40,10 +43,13 @@ import { VisuallyHidden } from 'radix-ui';
  */
 export function Stage({
   onRetryOutline,
+  autoPlayWhenReady = false,
 }: {
   onRetryOutline?: (outlineId: string) => Promise<void>;
+  autoPlayWhenReady?: boolean;
 }) {
   const { t } = useI18n();
+  const router = useRouter();
   const {
     mode,
     getCurrentScene,
@@ -76,6 +82,9 @@ export function Stage({
   const effectiveSidebarCollapsed = recordingMode ? true : sidebarCollapsed;
   const effectiveChatAreaCollapsed = recordingMode ? true : chatAreaCollapsed;
   const hideRoundtable = recordingMode;
+
+  // Track media tasks to delay autoPlay until media is ready
+  const mediaTasks = useMediaGenerationStore((s) => s.tasks);
 
   // PlaybackEngine state
   const [engineMode, setEngineMode] = useState<EngineMode>('idle');
@@ -139,6 +148,7 @@ export function Stage({
     audioPlayerRef.current.getAudioStream();
   }
   const chatAreaRef = useRef<ChatAreaRef>(null);
+  const hasTriggeredInitialAutoPlayRef = useRef(false);
   const lectureSessionIdRef = useRef<string | null>(null);
   const lectureActionCounterRef = useRef(0);
   const discussionAbortRef = useRef<AbortController | null>(null);
@@ -240,6 +250,69 @@ export function Stage({
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, [isRecording, stopRecording, setRecordingMode]);
+
+  // Auto-play when generation completes (for Auto Course recording)
+  useEffect(() => {
+    if (!autoPlayWhenReady) return;
+
+    // Only auto-play when ALL scenes are generated and we have at least one scene
+    // and there are no more outlines pending generation
+    const currentOutlinesLength = useStageStore.getState().outlines.length;
+    // We check if generatingOutlines array has items, OR if we have less scenes than outlines
+    const hasPendingOutlines = generatingOutlines.length > 0 || currentOutlinesLength === 0 || scenes.length < currentOutlinesLength;
+    
+    // Check for ongoing media generation
+    // We check ALL media tasks for this stage, not just the current scene, 
+    // because auto-play requires the entire presentation to be ready.
+    const hasPendingMedia = Object.values(mediaTasks).some(
+      t => t.stageId === currentScene?.stageId && (t.status === 'pending' || t.status === 'generating')
+    );
+
+    console.log('[Stage AutoPlay Debug] checking readiness:', {
+      autoPlayWhenReady,
+      scenesLength: scenes.length,
+      currentOutlinesLength,
+      generatingOutlinesLength: generatingOutlines.length,
+      hasPendingOutlines,
+      hasPendingMedia,
+      mediaTasksCount: Object.values(mediaTasks).filter(t => t.stageId === currentScene?.stageId).length,
+      autoStartRef: autoStartRef.current
+    });
+
+    if (scenes.length === 0 || hasPendingOutlines || hasPendingMedia) return;
+
+    // To prevent multiple triggers
+    if (autoStartRef.current || hasTriggeredInitialAutoPlayRef.current) return;
+
+    hasTriggeredInitialAutoPlayRef.current = true;
+    console.log('[Stage AutoPlay Debug] Ready to auto-play! Starting in 2 seconds...');
+
+    const timer = setTimeout(async () => {
+      try {
+        if (document.documentElement.requestFullscreen) {
+          try {
+            await document.documentElement.requestFullscreen();
+          } catch (fullscreenErr) {
+            console.warn('Fullscreen permission denied:', fullscreenErr);
+          }
+        }
+
+        setRecordingMode(true);
+
+        if (currentSceneId === scenes[0].id) {
+          handlePlayPause();
+        } else {
+          setCurrentSceneId(scenes[0].id);
+          // Set this immediately to avoid race condition where PlaybackEngine doesn't catch it
+          autoStartRef.current = true;
+        }
+      } catch (err) {
+        console.error('Auto-play failed:', err);
+      }
+    }, 2000);
+
+    return () => clearTimeout(timer);
+  }, [autoPlayWhenReady, scenes.length, generatingOutlines.length, mediaTasks, currentScene?.stageId, currentSceneId, setRecordingMode, setCurrentSceneId, handlePlayPause]);
 
   // Pick a student agent for discussion trigger (prioritize student > non-teacher > fallback)
   const pickStudentAgent = useCallback((): string => {
@@ -530,6 +603,16 @@ export function Stage({
                 // No more slide scenes left in recording mode
                 stopRecording();
                 setRecordingMode(false);
+                
+                // Notify auto-course page that lesson playback is complete
+                if (autoPlayWhenReady) {
+                  sessionStorage.setItem('autoCourse LessonComplete', 'true');
+                  window.dispatchEvent(new Event('lessonComplete'));
+                  // Delay navigation slightly to ensure event/storage are processed
+                  setTimeout(() => {
+                    router.push('/auto-course');
+                  }, 500);
+                }
               } else if (stageState.generatingOutlines.length > 0) {
                 // Last scene exhausted but next is still generating — go to pending page
                 // Only if recording mode is off (or we can't record pending anyway)
@@ -548,6 +631,16 @@ export function Stage({
               // Last scene in recording mode
               stopRecording();
               setRecordingMode(false);
+
+              // Notify auto-course page that lesson playback is complete
+              if (autoPlayWhenReady) {
+                sessionStorage.setItem('autoCourse LessonComplete', 'true');
+                window.dispatchEvent(new Event('lessonComplete'));
+                // Delay navigation slightly to ensure event/storage are processed
+                setTimeout(() => {
+                  router.push('/auto-course');
+                }, 500);
+              }
             }
           }, 1500);
         }

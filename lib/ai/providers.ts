@@ -664,7 +664,7 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     id: 'minimax',
     name: 'MiniMax',
     type: 'openai',
-    defaultBaseUrl: 'https://api.minimax.io/v1',
+    defaultBaseUrl: 'https://api.minimax.chat/v1',
     requiresApiKey: true,
     icon: '/logos/minimax.svg',
     models: [
@@ -936,7 +936,6 @@ export function getModel(config: ModelConfig): ModelWithInfo {
     if (provider) {
       providerType = provider.type;
       requiresApiKey = provider.requiresApiKey;
-      console.log(`[getModel] Resolved provider ${config.providerId} to type: ${providerType}`);
     } else {
       throw new Error(`Unknown provider: ${config.providerId}. Please provide providerType.`);
     }
